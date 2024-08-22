@@ -1,0 +1,6 @@
+selenium
+pyotp
+icalendar
+pytz
+requests
+webdriver-manager
