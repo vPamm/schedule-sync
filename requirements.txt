@@ -4,3 +4,4 @@ icalendar
 pytz
 requests
 webdriver-manager
+requests
