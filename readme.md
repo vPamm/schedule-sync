@@ -1,4 +1,4 @@
-A "simple" script that will login to a Microsoft Office account, then redirect to a Kronos schedule, scrape it, then export all the shifts to seperate .ics files to be uploaded to a nextcloud calendar.
+A "simple" script that will login to a Microsoft Office account, then redirect to a Kronos schedule, scrape it, then export all the shifts to seperate .ics files to be uploaded to a radicale calendar.
 
 Must add your own links and everything.
 
