@@ -5,3 +5,4 @@ pytz
 requests
 webdriver-manager
 requests
+icalendar

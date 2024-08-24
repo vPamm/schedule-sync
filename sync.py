@@ -34,9 +34,9 @@ KRONOS_URL = ""
 USERNAME = ""
 PASSWORD = ""
 TOTP_SECRET = ""
-NEXTCLOUD_WEBDAV_URL = ""
-NEXTCLOUD_USERNAME = ""
-NEXTCLOUD_PASSWORD = ""
+RADICALE_WEBDAV_URL = ""
+RADICALE_USERNAME = ""
+RADICALE_PASSWORD = ""
 
 def capture_screenshot(driver, name):
     """Capture a screenshot for debugging."""
@@ -205,21 +205,21 @@ def create_individual_ics_files(schedule_data):
     
     return ics_filenames
 
-def upload_to_nextcloud_individual_files(ics_filenames):
-    """Upload individual .ics files to Nextcloud."""
+def upload_to_radicale_individual_files(ics_filenames):
+    """Upload individual .ics files to Radicale."""
     for ics_file in ics_filenames:
         with open(ics_file, 'rb') as f:
             response = requests.put(
-                NEXTCLOUD_WEBDAV_URL + os.path.basename(ics_file),
+                RADICALE_WEBDAV_URL + os.path.basename(ics_file),
                 data=f,
-                auth=(NEXTCLOUD_USERNAME, NEXTCLOUD_PASSWORD),
+                auth=(RADICALE_USERNAME, RADICALE_PASSWORD),
                 headers={"Content-Type": "text/calendar"}
             )
 
         if response.status_code == 201:
-            logging.info(f"Successfully uploaded {ics_file} to Nextcloud")
+            logging.info(f"Successfully uploaded {ics_file} to Radicale")
         else:
-            logging.error(f"Failed to upload {ics_file} to Nextcloud: {response.status_code} - {response.text}")
+            logging.error(f"Failed to upload {ics_file} to Radicale: {response.status_code} - {response.text}")
 
 def main():
     options = webdriver.ChromeOptions()
@@ -235,7 +235,7 @@ def main():
         login_to_microsoft(driver)
         schedule_data = scrape_schedule(driver)
         ics_filenames = create_individual_ics_files(schedule_data)
-        upload_to_nextcloud_individual_files(ics_filenames)
+        upload_to_radicale_individual_files(ics_filenames)
         
     except Exception as e:
         logging.error(f"An error occurred: {e}")
