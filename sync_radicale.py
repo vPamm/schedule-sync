@@ -149,6 +149,43 @@ def scrape_schedule(driver):
     
     return schedule_data
 
+def retrieve_existing_events():
+    """Retrieve all existing events from the Radicale calendar."""
+    response = requests.get(RADICALE_WEBDAV_URL, auth=(RADICALE_USERNAME, RADICALE_PASSWORD))
+    
+    if response.status_code in [200, 207]:  # Handle both 200 OK and 207 Multi-Status
+        existing_events = {}
+        if response.status_code == 200:
+            logging.info("200 OK response received. Parsing calendar data.")
+            cal = Calendar.from_ical(response.content)
+            for component in cal.walk():
+                if component.name == "VEVENT":
+                    dtstart = component.get('dtstart').dt
+                    dtend = component.get('dtend').dt
+                    summary = component.get('summary')
+                    event_key = (dtstart, dtend, summary)
+                    existing_events[event_key] = component.to_ical().decode('utf-8')
+        else:
+            logging.info("207 Multi-Status response received. Parsing WebDAV data.")
+            tree = response.content.decode('utf-8')
+            events = re.findall(r'<href>(.*?)</href>', tree)
+            for event in events:
+                event_url = event.strip()
+                event_response = requests.get(RADICALE_WEBDAV_URL + event_url, auth=(RADICALE_USERNAME, RADICALE_PASSWORD))
+                if event_response.status_code == 200:
+                    existing_event = Calendar.from_ical(event_response.content)
+                    for component in existing_event.walk('VEVENT'):
+                        dtstart = component.get('dtstart').dt
+                        dtend = component.get('dtend').dt
+                        summary = component.get('summary')
+                        event_key = (dtstart, dtend, summary)
+                        existing_events[event_key] = component.to_ical().decode('utf-8')
+        logging.info(f"Retrieved {len(existing_events)} existing events from Radicale.")
+        return existing_events
+    else:
+        logging.error(f"Failed to retrieve existing events: {response.status_code} - {response.text}")
+        return {}
+
 def create_icalendar_event(date_str, time_range, details):
     """Create an iCalendar event."""
     event = Event()
@@ -165,8 +202,7 @@ def create_icalendar_event(date_str, time_range, details):
     start_time = local_tz.localize(datetime.strptime(start_time_str, "%a %b %d %Y %I:%M %p"))
     end_time = local_tz.localize(datetime.strptime(end_time_str, "%a %b %d %Y %I:%M %p"))
     
-    timestamp = int(time.time())
-    unique_uid = f"{uuid.uuid4()}-{timestamp}-{uuid.uuid4()}@mydomain.com"
+    unique_uid = f"{uuid.uuid4()}@mydomain.com"
     logging.info(f"Generated UID: {unique_uid} for event on {date_str}")
 
     event.add('summary', details)
@@ -179,18 +215,11 @@ def create_icalendar_event(date_str, time_range, details):
 
 def create_individual_ics_files(schedule_data):
     """Generate individual iCalendar (.ics) files for each event in schedule data."""
-    cal_base = Calendar()
-    cal_base.add('prodid', '-//My Calendar Application//EN')
-    cal_base.add('version', '2.0')
-    cal_base.add('calscale', 'GREGORIAN')
-
     ics_filenames = []
 
     for entry in schedule_data:
         event = create_icalendar_event(entry['date'], entry['time_range'], entry['details'])
         cal = Calendar()
-        for component in cal_base.subcomponents:
-            cal.add_component(component)
         cal.add_component(event)
         
         uid = event.get('uid')
@@ -205,23 +234,51 @@ def create_individual_ics_files(schedule_data):
     
     return ics_filenames
 
+def compare_and_handle_existing(events_to_upload, existing_events):
+    """Compare newly generated events with existing ones on Radicale and delete the local file if a match is found."""
+    for event_filename in events_to_upload:
+        with open(event_filename, 'rb') as f:
+            new_event = Calendar.from_ical(f.read())
+        
+        for new_event_component in new_event.walk('VEVENT'):
+            new_event_dtstart = new_event_component.get('dtstart').dt
+            new_event_dtend = new_event_component.get('dtend').dt
+            new_event_summary = new_event_component.get('summary')
+
+            logging.info(f"Checking new event with start time {new_event_dtstart} and end time {new_event_dtend} against existing events on Radicale.")
+
+            for event_key in existing_events.keys():
+                existing_event_dtstart, existing_event_dtend, existing_event_summary = event_key
+
+                if (new_event_dtstart == existing_event_dtstart and
+                    new_event_dtend == existing_event_dtend and
+                    new_event_summary == existing_event_summary):
+                    
+                    logging.info(f"Event with start time {new_event_dtstart} and end time {new_event_dtend} already exists on Radicale. Deleting local file: {event_filename}")
+                    os.remove(event_filename)
+                    break  # No need to check further if we found a match
+            else:
+                logging.info(f"No matching event found on Radicale for event starting at {new_event_dtstart}.")
+
 def upload_to_radicale_individual_files(ics_filenames):
     """Upload individual .ics files to Radicale."""
     for ics_file in ics_filenames:
-        with open(ics_file, 'rb') as f:
-            response = requests.put(
-                RADICALE_WEBDAV_URL + os.path.basename(ics_file),
-                data=f,
-                auth=(RADICALE_USERNAME, RADICALE_PASSWORD),
-                headers={"Content-Type": "text/calendar"}
-            )
+        if os.path.exists(ics_file):  # Check if the file still exists after comparison
+            with open(ics_file, 'rb') as f:
+                response = requests.put(
+                    RADICALE_WEBDAV_URL + os.path.basename(ics_file),
+                    data=f,
+                    auth=(RADICALE_USERNAME, RADICALE_PASSWORD),
+                    headers={"Content-Type": "text/calendar"}
+                )
 
-        if response.status_code == 201:
-            logging.info(f"Successfully uploaded {ics_file} to Radicale")
-        else:
-            logging.error(f"Failed to upload {ics_file} to Radicale: {response.status_code} - {response.text}")
+            if response.status_code == 201:
+                logging.info(f"Successfully uploaded {ics_file} to Radicale")
+            else:
+                logging.error(f"Failed to upload {ics_file} to Radicale: {response.status_code} - {response.text}")
 
 def main():
+    # Setup the WebDriver
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")  # Run Chrome in headless mode
     options.add_argument("--no-sandbox")  # Bypass OS security model, useful in Docker
@@ -232,11 +289,24 @@ def main():
     driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
     
     try:
+        # Retrieve existing events from Radicale
+        existing_events = retrieve_existing_events()        
+        
         login_to_microsoft(driver)
         schedule_data = scrape_schedule(driver)
+
+        # Ensure the directory exists
+        os.makedirs('individual_events', exist_ok=True)
+
+        # Generate new .ics files
         ics_filenames = create_individual_ics_files(schedule_data)
+
+        # Compare and handle existing events on Radicale
+        compare_and_handle_existing(ics_filenames, existing_events)
+
+        # Upload new events to Radicale
         upload_to_radicale_individual_files(ics_filenames)
-        
+
     except Exception as e:
         logging.error(f"An error occurred: {e}")
     
@@ -245,6 +315,4 @@ def main():
         logging.info("Browser closed")
 
 if __name__ == "__main__":
-    # Ensure the directory exists
-    os.makedirs('individual_events', exist_ok=True)
     main()
