@@ -1,4 +1,5 @@
 import logging
+import traceback
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -121,30 +122,69 @@ def login_to_microsoft(driver):
 
 def scrape_schedule(driver):
     logging.info("Starting to scrape the schedule")
-    driver.get(KRONOS_URL)
-    time.sleep(10)
+    
+    try:
+        # Navigate to the Kronos schedule page
+        driver.get(KRONOS_URL)
+        logging.info("Navigated to Kronos schedule page.")
+        log_page_details(driver)  # Log current page details and capture a screenshot
 
-    schedule_days = WebDriverWait(driver, 40).until(
-        EC.presence_of_all_elements_located((By.CSS_SELECTOR, "li.listItem"))
-    )
-    logging.info(f"Located {len(schedule_days)} schedule day elements.")
+        # Wait for the schedule list to be present
+        schedule_list = WebDriverWait(driver, 40).until(
+            EC.presence_of_element_located((By.ID, "my-schedule-list"))
+        )
+        logging.info("Schedule list found.")
 
-    schedule_data = []
-    for day in schedule_days:
-        day_date = day.get_attribute("datetime").split(' GMT')[0]
-        
-        shift_wrappers = day.find_elements(By.CSS_SELECTOR, "div.scheduleEntity.interactive.shift-wrapper")
-        
-        for shift in shift_wrappers:
-            time_range = shift.find_element(By.CSS_SELECTOR, "time.label").text
-            time_range_cleaned = re.sub(r'\s*\[.*?\]', '', time_range)  # Remove anything in square brackets
-            shift_details = shift.find_element(By.CSS_SELECTOR, "div.details").text
-            schedule_data.append({
-                "date": day_date,
-                "time_range": time_range_cleaned,
-                "details": shift_details
-            })
-    logging.info(f"Schedule data scraped: {schedule_data}")
+        # Locate all day elements (li elements with class 'withDivider')
+        schedule_days = schedule_list.find_elements(By.CSS_SELECTOR, "li.withDivider")
+        logging.info(f"Located {len(schedule_days)} schedule day elements.")
+
+        schedule_data = []
+
+        # Iterate over each day to find shifts
+        for day in schedule_days:
+            try:
+                day_date = day.get_attribute("datetime")
+                logging.info(f"Processing schedule for date: {day_date}")
+
+                # Locate shift elements within the day
+                shift_wrappers = day.find_elements(By.CSS_SELECTOR, "div.scheduleEntityWrapper")
+                logging.info(f"Found {len(shift_wrappers)} shifts for date: {day_date}")
+
+                for shift in shift_wrappers:
+                    time_range = shift.find_element(By.CSS_SELECTOR, "time.label").text
+                    time_range_cleaned = re.sub(r'\s*\[.*?\]', '', time_range)  # Clean time range
+                    shift_details = shift.find_element(By.CSS_SELECTOR, "div.details").text
+                    logging.info(f"Shift details: {time_range_cleaned}, {shift_details}")
+
+                    schedule_data.append({
+                        "date": day_date,
+                        "time_range": time_range_cleaned,
+                        "details": shift_details
+                    })
+            except Exception as e:
+                logging.error(f"Error scraping shifts for date {day_date}: {str(e)}")
+                logging.error(f"Full traceback: {traceback.format_exc()}")
+                capture_screenshot(driver, f"error_scraping_shifts_{day_date}")
+
+        logging.info(f"Schedule data successfully scraped: {schedule_data}")
+        return schedule_data
+
+    except TimeoutException as e:
+        logging.error("Timeout while waiting for schedule elements.")
+        capture_screenshot(driver, "timeout_error")
+        # Save the page source for inspection
+        with open("page_source_error.html", "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        logging.error(f"Page source saved to page_source_error.html")
+        logging.error(f"Full traceback: {traceback.format_exc()}")
+        return []
+
+    except Exception as e:
+        logging.error(f"An error occurred while scraping the schedule: {str(e)}")
+        logging.error(f"Full traceback: {traceback.format_exc()}")
+        capture_screenshot(driver, "scrape_error")
+        return []
     
     return schedule_data
 
