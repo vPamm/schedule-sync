@@ -21,7 +21,7 @@ pip install -r requirements.txt
 
 # Ensure script is executable
 echo "Making the schedule sync script executable..."
-chmod +x schedule_sync.py
+chmod +x sync_nextcloud.py && chmod +x sync_radicale.py
 
 # Deactivate virtual environment
 echo "Deactivating virtual environment..."
