@@ -1,10 +1,10 @@
 import logging
-import traceback
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from webdriver_manager.chrome import ChromeDriverManager
 import pyotp
 import time
@@ -17,6 +17,7 @@ import uuid
 from caldav import DAVClient
 import requests
 import urllib3
+import traceback
 
 # Setup logging
 logging.basicConfig(
@@ -70,6 +71,7 @@ def safe_click(driver, by, value, retries=5):
 
 def login_to_microsoft(driver):
     logging.info("Starting Microsoft login process")
+    logging.info(f"Microsoft Login URL: {MICROSOFT_LOGIN_URL}")
     driver.get(MICROSOFT_LOGIN_URL)
     time.sleep(5)  # Allow the page to load fully
     
@@ -122,24 +124,22 @@ def login_to_microsoft(driver):
 
 def scrape_schedule(driver):
     logging.info("Starting to scrape the schedule")
-    
+    logging.info(f"Kronos URL: {KRONOS_URL}")
+
     try:
         # Navigate to the Kronos schedule page
         driver.get(KRONOS_URL)
         logging.info("Navigated to Kronos schedule page.")
         log_page_details(driver)  # Log current page details and capture a screenshot
 
-        # Wait for the schedule list to be present
-        schedule_list = WebDriverWait(driver, 40).until(
-            EC.presence_of_element_located((By.ID, "my-schedule-list"))
-        )
-        logging.info("Schedule list found.")
-
         # Locate all day elements (li elements with class 'withDivider')
-        schedule_days = schedule_list.find_elements(By.CSS_SELECTOR, "li.withDivider")
+        schedule_days = WebDriverWait(driver, 40).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "li.withDivider"))
+        )
         logging.info(f"Located {len(schedule_days)} schedule day elements.")
 
         schedule_data = []
+        seen_shifts = set()
 
         # Iterate over each day to find shifts
         for day in schedule_days:
@@ -148,20 +148,60 @@ def scrape_schedule(driver):
                 logging.info(f"Processing schedule for date: {day_date}")
 
                 # Locate shift elements within the day
-                shift_wrappers = day.find_elements(By.CSS_SELECTOR, "div.scheduleEntityWrapper")
+                shift_wrappers = day.find_elements(By.CSS_SELECTOR, "div.scheduleEntityWrapper, div.shiftPosition")
                 logging.info(f"Found {len(shift_wrappers)} shifts for date: {day_date}")
 
                 for shift in shift_wrappers:
-                    time_range = shift.find_element(By.CSS_SELECTOR, "time.label").text
-                    time_range_cleaned = re.sub(r'\s*\[.*?\]', '', time_range)  # Clean time range
-                    shift_details = shift.find_element(By.CSS_SELECTOR, "div.details").text
-                    logging.info(f"Shift details: {time_range_cleaned}, {shift_details}")
+                    try:
+                        # Attempt to find the time element
+                        try:
+                            time_element = shift.find_element(By.CSS_SELECTOR, "p.props, time.label")
+                            time_range = time_element.text
 
-                    schedule_data.append({
-                        "date": day_date,
-                        "time_range": time_range_cleaned,
-                        "details": shift_details
-                    })
+                            # Use regex to extract start time, end time, and shift length
+                            match = re.search(
+                                r'(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)\s*(\d+\.\d+)?',
+                                time_range
+                            )
+                            if match:
+                                start_time_str = match.group(1)
+                                end_time_str = match.group(2)
+                                shift_length = match.group(3)
+                            else:
+                                logging.warning(f"Could not parse time range: {time_range}")
+                                continue  # Skip this shift
+                        except NoSuchElementException:
+                            logging.warning(f"No time element found for shift on date {day_date}. Skipping shift.")
+                            continue  # Skip this shift if no time element is found
+
+                        # Attempt to find the shift details
+                        try:
+                            shift_details = shift.find_element(By.CSS_SELECTOR, "p.label").text
+                        except NoSuchElementException:
+                            shift_details = "No details available"
+
+                        # Create a unique key for the shift
+                        shift_key = (day_date, start_time_str, end_time_str, shift_details, shift_length)
+
+                        # Check if the shift has already been processed
+                        if shift_key in seen_shifts:
+                            logging.info(f"Duplicate shift found for date {day_date}: {start_time_str}-{end_time_str}, {shift_details}. Skipping.")
+                            continue  # Skip adding this shift as it's a duplicate
+                        else:
+                            seen_shifts.add(shift_key)  # Add the shift to the set of seen shifts
+
+                        logging.info(f"Shift details: {start_time_str}-{end_time_str} ({shift_length} hrs), {shift_details}")
+
+                        schedule_data.append({
+                            "date": day_date,
+                            "start_time": start_time_str,
+                            "end_time": end_time_str,
+                            "details": shift_details,
+                            "shift_length": shift_length
+                        })
+                    except Exception as e:
+                        logging.error(f"Error scraping shift details for date {day_date}: {str(e)}")
+                        logging.error(f"Full traceback: {traceback.format_exc()}")
             except Exception as e:
                 logging.error(f"Error scraping shifts for date {day_date}: {str(e)}")
                 logging.error(f"Full traceback: {traceback.format_exc()}")
@@ -181,12 +221,9 @@ def scrape_schedule(driver):
         return []
 
     except Exception as e:
-        logging.error(f"An error occurred while scraping the schedule: {str(e)}")
+        logging.error(f"An error occurred: {str(e)}")
         logging.error(f"Full traceback: {traceback.format_exc()}")
-        capture_screenshot(driver, "scrape_error")
         return []
-    
-    return schedule_data
 
 def retrieve_existing_events():
     """Retrieve all existing events from the 'personal' calendar in Nextcloud using CalDAV."""
@@ -221,52 +258,80 @@ def retrieve_existing_events():
     logging.info(f"Retrieved {len(existing_events)} existing events from the 'personal' calendar.")
     return existing_events
 
-def create_icalendar_event(date_str, time_range, details):
+def create_icalendar_event(date_str, start_time_str, end_time_str, details, shift_length=None):
     """Create an iCalendar event."""
     event = Event()
 
-    date_part, time_part = date_str.split(' '), time_range.split('-')
-    
+    # Parse the date and times
+    date_part = date_str.split(' ')
     date_formatted = f"{date_part[0]} {date_part[1]} {date_part[2]} {date_part[3]}"
-    
-    start_time_str = f"{date_formatted} {time_part[0].strip()}"
-    end_time_str = f"{date_formatted} {time_part[1].strip()}"
 
-    # Assuming the times are in local time, e.g., US/Eastern
+    start_datetime_str = f"{date_formatted} {start_time_str}"
+    end_datetime_str = f"{date_formatted} {end_time_str}"
+
+    # Assuming times are in US/Eastern timezone
     local_tz = timezone('US/Eastern')
-    start_time = local_tz.localize(datetime.strptime(start_time_str, "%a %b %d %Y %I:%M %p"))
-    end_time = local_tz.localize(datetime.strptime(end_time_str, "%a %b %d %Y %I:%M %p"))
-    
+    start_time = local_tz.localize(datetime.strptime(start_datetime_str, "%a %b %d %Y %I:%M %p"))
+    end_time = local_tz.localize(datetime.strptime(end_datetime_str, "%a %b %d %Y %I:%M %p"))
+
+    # Generate a unique UID
     unique_uid = f"{uuid.uuid4()}@mydomain.com"
     logging.info(f"Generated UID: {unique_uid} for event on {date_str}")
 
-    event.add('summary', details)
+    # Adjust details if no details are available
+    if details == "No details available":
+        if shift_length:
+            details = f"{shift_length} hrs"
+        else:
+            details = ""
+
+    # Build the event summary
+    event_summary = f"{start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}"
+    if details:
+        event_summary += f": {details}"
+
+    event.add('summary', event_summary)
+    logging.info(f"Event summary set to: {event_summary}")
+
+    # Add event timing and other properties
     event.add('dtstart', vDatetime(start_time))
     event.add('dtend', vDatetime(end_time))
-    event.add('uid', unique_uid)  # Ensure unique UID for each event
-    event.add('dtstamp', vDatetime(datetime.utcnow()))  # Add timestamp for event creation
-    
+    event.add('uid', unique_uid)
+    event.add('dtstamp', vDatetime(datetime.utcnow()))
+
     return event
+
 
 def create_individual_ics_files(schedule_data):
     """Generate individual iCalendar (.ics) files for each event in schedule data."""
     ics_filenames = []
 
     for entry in schedule_data:
-        event = create_icalendar_event(entry['date'], entry['time_range'], entry['details'])
-        cal = Calendar()
-        cal.add_component(event)
-        
-        uid = event.get('uid')
-        ics_filename = f"{uid}.ics"
-        ics_filepath = os.path.join('individual_events', ics_filename)
+        try:
+            event = create_icalendar_event(
+                entry['date'],
+                entry['start_time'],
+                entry['end_time'],
+                entry['details'],
+                entry.get('shift_length')  # Pass shift_length if available
+            )
+            cal = Calendar()
+            cal.add_component(event)
 
-        with open(ics_filepath, 'wb') as f:
-            f.write(cal.to_ical())
-        
-        ics_filenames.append(ics_filepath)
-        logging.info(f"Generated iCalendar file: {ics_filepath}")
-    
+            uid = event.get('uid')
+            ics_filename = f"{uid}.ics"
+            ics_filepath = os.path.join('individual_events', ics_filename)
+
+            with open(ics_filepath, 'wb') as f:
+                f.write(cal.to_ical())
+
+            ics_filenames.append(ics_filepath)
+            logging.info(f"Generated iCalendar file: {ics_filepath}")
+        except Exception as e:
+            logging.error(f"Error creating iCalendar event for entry: {entry}")
+            logging.error(f"Exception: {e}")
+            logging.error(f"Full traceback: {traceback.format_exc()}")
+
     return ics_filenames
 
 def compare_and_handle_existing(events_to_upload, existing_events):
@@ -325,9 +390,6 @@ def upload_to_nextcloud_individual_files(ics_filenames):
             except Exception as e:
                 logging.error(f"Failed to upload {ics_file} to Nextcloud: {e}")
 
-
-
-
 def main():
     # Setup the WebDriver
     options = webdriver.ChromeOptions()
@@ -360,7 +422,8 @@ def main():
 
     except Exception as e:
         logging.error(f"An error occurred: {e}")
-    
+        logging.error(f"Full traceback: {traceback.format_exc()}")  # Added traceback
+
     finally:
         driver.quit()
         logging.info("Browser closed")
